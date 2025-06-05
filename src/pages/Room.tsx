@@ -27,6 +27,18 @@ import type { Socket } from "socket.io-client";
 import { useToast } from "@/components/ui/use-toast";
 import { MessagePayload, ParticipantUpdatePayload } from "@/interfaces/room-events.interface";
 
+// Define JoinRoomResponse type if not already imported
+interface JoinRoomResponse {
+  success: boolean;
+  room: {
+    id: string;
+    name: string;
+    description: string;
+    host: string;
+    participants: ServerParticipant[];
+  };
+}
+
 interface Participant {
   id: string;
   username: string;
@@ -39,6 +51,20 @@ interface Participant {
   isOnStage?: boolean;
   stream?: MediaStream;
 }
+
+// Helper to ensure default values for Participant
+export const getParticipantWithDefaults = (p: Partial<Participant>): Participant => ({
+  id: p.id ?? '',
+  username: p.username ?? '',
+  isHost: p.isHost ?? false,
+  avatar: p.avatar ?? '👤',
+  isModerator: p.isModerator ?? false,
+  isMuted: p.isMuted ?? true,
+  hasVideo: p.hasVideo ?? false,
+  volume: p.volume ?? 100,
+  isOnStage: p.isOnStage ?? false,
+  stream: p.stream,
+});
 
 interface Message {
   id: string;
@@ -56,19 +82,21 @@ interface ServerParticipant {
   id: string;
   username: string;
   isHost: boolean;
-  avatar?: string;
-  isModerator?: boolean;
-  isMuted?: boolean;
-  hasVideo?: boolean;
-  volume?: number;
 }
 
-interface JoinRoomResponse {
-  participant?: ServerParticipant;
-  participants?: ServerParticipant[];
-}
+// (Removed erroneous top-level socket.on handler. All socket event handlers are registered inside the Room component.)
 
 const Room = () => {
+  // Helper function to deduplicate participants
+  const deduplicateParticipants = (participants: Participant[]): Participant[] => {
+    const seen = new Set<string>();
+    return participants.filter(p => {
+      if (seen.has(p.id)) return false;
+      seen.add(p.id);
+      return true;
+    });
+  };
+
   const { roomId } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -321,7 +349,7 @@ const Room = () => {
   // Effect to handle peer connections
   useEffect(() => {
     if (!isConnected || !localStreamRef.current) return;
-    
+    console.log('------------------------')
     // Setup peer connections for existing participants
     participants.forEach(participant => {
       if (participant.id !== userId && !peerConnectionsRef.current[participant.id]) {
@@ -329,6 +357,9 @@ const Room = () => {
       }
     });
   }, [isConnected, participants, userId, createPeerConnection]);
+
+  // Ref to track if the page is refreshing
+  const isPageRefreshing = useRef(false);
 
   // Main effect for room initialization
   useEffect(() => {
@@ -339,6 +370,7 @@ const Room = () => {
     }
 
     console.log('Initializing room:', { roomId, username });
+    console.log('--------------------------------------');
     
     const socket = socketService.getSocket();
     setSocket(socket);
@@ -363,111 +395,112 @@ const Room = () => {
     }, (response: JoinRoomResponse) => {
       console.log('Raw join room response:', JSON.stringify(response, null, 2));
 
-      let existingParticipants: Participant[] = [];
+      const participantMap = new Map<string, Participant>();
 
-      // Handle response which might contain nested participant data
-      if (response?.participants) {
-        existingParticipants = response.participants.map((p: ServerParticipant) => ({
-          id: p.id,
-          username: p.username,
-          isHost: p.isHost,
-          avatar: p.avatar || '👤',
-          isModerator: p.isModerator || false,
-          isMuted: p.isMuted || true,
-          hasVideo: p.hasVideo || false,
-          volume: p.volume || 100
-        }));
+      // Add current user first
+      participantMap.set(userId, {
+        id: userId,
+        username: username,
+        isHost: false,
+        avatar: '👤',
+        isModerator: false,
+        isMuted: true,
+        hasVideo: false,
+        volume: 100
+      });
+
+      // Process participants array from server - now checking room.participants
+      if (response?.room?.participants && Array.isArray(response.room.participants)) {
+        console.log('Processing server participants:', response.room.participants);
+        
+        // Use Set to track unique IDs
+        const uniqueIds = new Set<string>();
+        
+        response.room.participants.forEach((p: ServerParticipant) => {
+          // Only add if we haven't seen this ID before and it's not the current user
+          if (p.id && !uniqueIds.has(p.id) && p.id !== userId) {
+            uniqueIds.add(p.id);
+            participantMap.set(p.id, {
+              id: p.id,
+              username: p.username,
+              isHost: p.isHost,
+              avatar: '👤',
+              isModerator: false,
+              isMuted: true,
+              hasVideo: false,
+              volume: 100
+            });
+          }
+        });
+
+        console.log('Participant map after processing:', 
+          Array.from(participantMap.values()));
+      } else {
+        console.log('No room.participants array in response:', response);
       }
 
-      // Also check for participant field in response
-      if (response?.participant) {
-        const p = response.participant;
-        if (!existingParticipants.some(ep => ep.id === p.id)) {
-          existingParticipants.push({
-            id: p.id,
-            username: p.username,
-            isHost: p.isHost,
-            avatar: p.avatar || '👤',
-            isModerator: p.isModerator || false,
-            isMuted: p.isMuted || true,
-            hasVideo: p.hasVideo || false,
-            volume: p.volume || 100
-          });
-        }
-      }
+      // Convert to array with current user first
+      const currentUser = participantMap.get(userId);
+      const others = Array.from(participantMap.values()).filter(p => p.id !== userId);
+      const participantsList = currentUser ? [currentUser, ...others] : others;
 
-      console.log('Processed participants:', existingParticipants);
-      
-      setParticipants([
-        currentUser,
-        ...existingParticipants.filter(p => p.id !== userId)
-      ]);
+      console.log('Final participants list:', participantsList);
+      setParticipants(participantsList);
     });
 
     // Handle new participant joining
     socket.on('participantJoined', (data: { participant: ServerParticipant, participants: ServerParticipant[] }) => {
       console.log('New participant joined - Raw data:', data);
       
-      if (!data.participant?.id || !data.participant?.username) {
-        console.error('Invalid participant data received:', data);
-        return;
-      }
-
-      // Process the new participant
-      const processedParticipant: Participant = {
-        id: data.participant.id,
-        username: data.participant.username,
-        isHost: data.participant.isHost,
-        avatar: data.participant.avatar || '👤',
-        isModerator: data.participant.isModerator || false,
-        isMuted: data.participant.isMuted || true,
-        hasVideo: data.participant.hasVideo || false,
-        volume: data.participant.volume || 100
-      };
-      
       setParticipants(prev => {
-        // Check if participant already exists
-        if (prev.some(p => p.id === processedParticipant.id)) {
-          console.log('Participant already exists, skipping:', processedParticipant.id);
-          return prev;
+        const participantMap = new Map(prev.map(p => [p.id, p]));
+        
+        // Add new participant with only the fields server provides
+        if (data.participant?.id && !participantMap.has(data.participant.id)) {
+          participantMap.set(data.participant.id, {
+            id: data.participant.id,
+            username: data.participant.username,
+            isHost: data.participant.isHost,
+            // Set default values for required UI fields
+            avatar: '👤',
+            isModerator: false,
+            isMuted: true,
+            hasVideo: false,
+            volume: 100
+          });
         }
 
-        // Add new participant
-        const newParticipants = [...prev, processedParticipant];
-        console.log('Updated participants list:', newParticipants);
-        return newParticipants;
+        // Update participant list with only fields server provides
+        if (data.participants?.length > 0) {
+          data.participants.forEach(p => {
+            if (p.id && !participantMap.has(p.id)) {
+              participantMap.set(p.id, {
+                id: p.id,
+                username: p.username,
+                isHost: p.isHost,
+                // Set default values for required UI fields
+                avatar: '👤',
+                isModerator: false,
+                isMuted: true,
+                hasVideo: false,
+                volume: 100
+              });
+            }
+          });
+        }
+
+        const values = Array.from(participantMap.values());
+        const currentUser = values.find(p => p.id === userId);
+        const others = values.filter(p => p.id !== userId);
+
+        return currentUser ? [currentUser, ...others] : others;
       });
 
       // Show toast with username
       toast({
         title: "New Participant",
-        description: `${processedParticipant.username} joined the room`,
+        description: `${data.participant.username} joined the room`,
       });
-
-      // Also update participant list if received
-      if (data.participants?.length > 0) {
-        setParticipants(prev => {
-          const currentIds = new Set(prev.map(p => p.id));
-          const newParticipants = data.participants
-            .filter(p => p.id && !currentIds.has(p.id))
-            .map(p => ({
-              id: p.id,
-              username: p.username,
-              isHost: p.isHost,
-              avatar: p.avatar || '👤',
-              isModerator: p.isModerator || false,
-              isMuted: p.isMuted || true,
-              hasVideo: p.hasVideo || false,
-              volume: p.volume || 100
-            }));
-          
-          if (newParticipants.length > 0) {
-            console.log('Adding additional participants:', newParticipants);
-            return [...prev, ...newParticipants];
-          }
-          return prev;
-        });
-      }
     });
 
     // Handle participant leaving
@@ -530,14 +563,26 @@ const Room = () => {
     });
 
     // Initialize WebRTC
-    setupMediaDevices().catch(error => {
-      console.error('Failed to setup media devices:', error);
+    setupMediaDevices().catch((error) => {
+      // You can handle the error here if needed
+      console.error('Error setting up media devices:', error);
+    });
+
+    // Add this function to handle refresh detection
+    window.addEventListener('beforeunload', () => {
+      isPageRefreshing.current = true;
+    });
+    window.addEventListener('beforeunload', () => {
+      isPageRefreshing.current = true;
     });
 
     // Cleanup function
     return () => {
-      console.log('Cleaning up room connection');
-      socket.emit('leaveRoom', { roomId });
+      if (!isPageRefreshing.current) {
+        // Only emit leaveRoom if not refreshing
+        socket.emit('leaveRoom', { roomId });
+      }
+      
       cleanupMediaDevices();
       mediaSetupAttempted.current = false;
       
@@ -549,6 +594,50 @@ const Room = () => {
       socket.off('connect_error');
     };
   }, [roomId, userId, username, navigate, cleanupMediaDevices, setupMediaDevices, toast]);
+
+  // Add this effect to handle reconnection after refresh
+  useEffect(() => {
+    if (socket && roomId) {
+      // Request current room state
+      socket.emit('getRoomState', { roomId }, ( response: { participants: ServerParticipant[] }) => {
+        console.log('Room state after refresh:', response);
+        
+        if (response?.participants) {
+          const participantMap = new Map<string, Participant>();
+          
+          // Add current user first
+          participantMap.set(userId, {
+            id: userId,
+            username: username,
+            isHost: false,
+            avatar: '👤',
+            isModerator: false,
+            isMuted: true,
+            hasVideo: false,
+            volume: 100
+          });
+          
+          // Add all other participants
+          response.participants.forEach(p => {
+            if (p.id && !participantMap.has(p.id)) {
+              participantMap.set(p.id, {
+                id: p.id,
+                username: p.username,
+                isHost: p.isHost,
+                avatar: '👤',
+                isModerator: false,
+                isMuted: true,
+                hasVideo: false,
+                volume: 100
+              });
+            }
+          });
+          
+          setParticipants(Array.from(participantMap.values()));
+        }
+      });
+    }
+  }, [socket, roomId, userId, username]);
 
   const sendMessage = () => {
     if (!socket || !roomId) {
