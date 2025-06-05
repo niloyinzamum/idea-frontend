@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -7,10 +7,14 @@ import { Navbar } from "@/components/Navbar";
 import { Users, MessageCircle, Mic, Video, Crown } from "lucide-react";
 import { socketService } from "../services/socket.service";
 import type { Room } from "../interfaces/room.interface";
+import UsernameDialog from "@/components/UsernameDialog";
 
 const Dashboard = () => {
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [showUsernameDialog, setShowUsernameDialog] = useState(false);
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const socket = socketService.getSocket();
+  const navigate = useNavigate();
 
   useEffect(() => {
     // Get initial rooms
@@ -46,6 +50,24 @@ const Dashboard = () => {
       socket.off('roomDeleted');
     };
   }, [socket]);
+
+  const handleJoinRoom = (roomId: string) => {
+    setSelectedRoomId(roomId);
+    const savedUsername = localStorage.getItem('username');
+    if (savedUsername) {
+      navigate(`/room/${roomId}`);
+    } else {
+      setShowUsernameDialog(true);
+    }
+  };
+
+  const handleUsernameSubmit = (username: string) => {
+    localStorage.setItem('username', username);
+    setShowUsernameDialog(false);
+    if (selectedRoomId) {
+      navigate(`/room/${selectedRoomId}`);
+    }
+  };
 
   const getTypeColor = (type: string) => {
     const colors = {
@@ -127,17 +149,24 @@ const Dashboard = () => {
                   </div>
                 </div>
                 
-                <Link to={`/room/${room.id}`}>
-                  <Button className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white transition-all duration-300 transform group-hover:scale-105">
-                    <MessageCircle className="w-4 h-4 mr-2" />
-                    Join Room
-                  </Button>
-                </Link>
+                <Button
+                  onClick={() => handleJoinRoom(String(room.id))}
+                  className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white transition-all duration-300 transform group-hover:scale-105"
+                >
+                  <MessageCircle className="w-4 h-4 mr-2" />
+                  Join Room
+                </Button>
               </CardContent>
             </Card>
           ))}
         </div>
       </div>
+
+      <UsernameDialog 
+        open={showUsernameDialog}
+        onOpenChange={setShowUsernameDialog}
+        onSubmit={handleUsernameSubmit}
+      />
     </div>
   );
 };

@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { Navbar } from "@/components/Navbar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
-import { Navbar } from "@/components/Navbar";
 import { 
   Mic, 
   MicOff, 
@@ -22,20 +22,20 @@ import {
   PhoneOff
 } from "lucide-react";
 import { socketService } from "@/services/socket.service";
+import type { Room as RoomType } from "@/interfaces/room.interface";
 import type { Socket } from "socket.io-client";
 import { useToast } from "@/components/ui/use-toast";
-import { generateRandomName } from "@/lib/utils";
 import { MessagePayload, ParticipantUpdatePayload } from "@/interfaces/room-events.interface";
 
 interface Participant {
   id: string;
-  name: string;
-  avatar: string;
+  username: string;
   isHost: boolean;
-  isModerator: boolean;
-  isMuted: boolean;
-  hasVideo: boolean;
-  volume: number;
+  avatar?: string;
+  isModerator?: boolean;
+  isMuted?: boolean;
+  hasVideo?: boolean;
+  volume?: number;
   isOnStage?: boolean;
   stream?: MediaStream;
 }
@@ -52,6 +52,22 @@ interface MediaDeviceError extends Error {
   name: 'NotFoundError' | 'NotAllowedError' | 'NotReadableError' | 'OverconstrainedError' | string;
 }
 
+interface ServerParticipant {
+  id: string;
+  username: string;
+  isHost: boolean;
+  avatar?: string;
+  isModerator?: boolean;
+  isMuted?: boolean;
+  hasVideo?: boolean;
+  volume?: number;
+}
+
+interface JoinRoomResponse {
+  participant?: ServerParticipant;
+  participants?: ServerParticipant[];
+}
+
 const Room = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
@@ -65,7 +81,7 @@ const Room = () => {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [userId] = useState(crypto.randomUUID());
-  const [userName] = useState(generateRandomName());
+  const [username] = useState(localStorage.getItem('username') || '');
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionsRef = useRef<Record<string, RTCPeerConnection>>({});
   const mediaSetupAttempted = useRef(false);
@@ -77,7 +93,7 @@ const Room = () => {
       console.log('Current participants in room (excluding self):', 
         otherParticipants.map(p => ({
           id: p.id,
-          name: p.name,
+          name: p.username,
           isMuted: p.isMuted,
           hasVideo: p.hasVideo
         }))
@@ -85,43 +101,108 @@ const Room = () => {
     }
   }, [participants, userId]);
 
-  const createPeerConnection = useCallback((peerId: string) => {
-    const peerConnection = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-      ]
-    });
+  // Add debug effect to monitor participants state
+  useEffect(() => {
+    console.log('Current participants:', participants.map(p => ({
+      id: p.id,
+      name: p.username,
+      isMuted: p.isMuted,
+      hasVideo: p.hasVideo,
+      isCurrentUser: p.id === userId
+    })));
+  }, [participants, userId]);
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
-        if (localStreamRef.current) {
-          peerConnection.addTrack(track, localStreamRef.current);
-        }
-      });
+  // Add monitoring for participant state changes
+  useEffect(() => {
+    console.log('Participants state updated - Full data:', JSON.stringify(participants, null, 2));
+    console.log('Participants summary:', participants.map(p => ({
+      id: p.id,
+      name: p.username,
+      isMuted: p.isMuted,
+      hasVideo: p.hasVideo,
+      isCurrentUser: p.id === userId,
+      isOnStage: p.isOnStage,
+      stream: p.stream ? 'Has stream' : 'No stream'
+    })));
+  }, [participants, userId]);
+
+  const createPeerConnection = useCallback((peerId: string) => {
+    if (!peerId) {
+      console.error('Cannot create peer connection: Invalid peer ID');
+      return null;
     }
 
-    peerConnection.onicecandidate = event => {
-      if (event.candidate) {
-        socket?.emit('iceCandidate', {
-          candidate: event.candidate,
-          peerId
+    try {
+      console.log(`Creating peer connection for peer: ${peerId}`);
+      const peerConnection = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+        ]
+      });
+
+      // Add local tracks to the connection
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => {
+          if (localStreamRef.current) {
+            console.log(`Adding ${track.kind} track to peer connection`);
+            peerConnection.addTrack(track, localStreamRef.current);
+          }
         });
       }
-    };
 
-    peerConnection.ontrack = event => {
-      const [stream] = event.streams;
-      setParticipants(prev => prev.map(p => 
-        p.id === peerId
-          ? { ...p, stream }
-          : p
-      ));
-    };
+      // ICE candidate handling
+      peerConnection.onicecandidate = event => {
+        if (event.candidate) {
+          console.log(`Sending ICE candidate for peer: ${peerId}`);
+          socket?.emit('iceCandidate', {
+            candidate: event.candidate,
+            peerId
+          });
+        }
+      };
 
-    peerConnectionsRef.current[peerId] = peerConnection;
-    return peerConnection;
-  }, [socket]);
+      // Remote track handling with error checking
+      peerConnection.ontrack = event => {
+        console.log(`Received remote track from peer: ${peerId}`);
+        const [stream] = event.streams;
+        if (stream) {
+          setParticipants(prev => prev.map(p => 
+            p.id === peerId ? { ...p, stream } : p
+          ));
+        }
+      };
+
+      // Connection state changes
+      peerConnection.onconnectionstatechange = () => {
+        console.log(`Peer connection state changed to: ${peerConnection.connectionState}`);
+        if (peerConnection.connectionState === 'failed') {
+          console.log(`Peer connection failed for peer: ${peerId}`);
+          toast({
+            title: "Connection Issue",
+            description: "Lost connection to a participant. Attempting to reconnect...",
+            variant: "destructive"
+          });
+          // Cleanup failed connection
+          peerConnection.close();
+          delete peerConnectionsRef.current[peerId];
+          // Could trigger a reconnection here if desired
+        }
+      };
+
+      peerConnectionsRef.current[peerId] = peerConnection;
+      return peerConnection;
+    } catch (error) {
+      console.error('Error creating peer connection:', error);
+      toast({
+        title: "Connection Error",
+        description: "Failed to establish peer connection. Please try reconnecting.",
+        variant: "destructive"
+      });
+      return null;
+    }
+  }, [socket, toast]);
 
   const cleanupMediaDevices = useCallback(() => {
     if (localStreamRef.current) {
@@ -138,53 +219,99 @@ const Room = () => {
     mediaSetupAttempted.current = true;
 
     try {
-      // First check if media devices are available
+      console.log('Starting media device setup');
+      
       const devices = await navigator.mediaDevices.enumerateDevices();
-      const hasAudio = devices.some(device => device.kind === 'audioinput');
-      const hasVideo = devices.some(device => device.kind === 'videoinput');
+      const hasAudioDevice = devices.some(device => device.kind === 'audioinput');
+      const hasVideoDevice = devices.some(device => device.kind === 'videoinput');
 
-      if (!hasAudio && !hasVideo) {
-        throw new Error('No audio or video devices found');
+      console.log('Available devices:', {
+        audio: hasAudioDevice,
+        video: hasVideoDevice
+      });
+
+      if (!hasAudioDevice && !hasVideoDevice) {
+        throw new Error('No media devices found');
       }
 
-      // Request only available devices
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: hasAudio ? true : false,
-        video: hasVideo ? true : false
+        audio: hasAudioDevice ? {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } : false,
+        video: hasVideoDevice ? {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: "user"
+        } : false
       });
       
       localStreamRef.current = stream;
-      setIsConnected(true);
       
-      // Initialize with devices in their default state
-      if (hasAudio) {
-        stream.getAudioTracks().forEach(track => {
-          track.enabled = !isMuted;
-        });
+      // Initialize tracks with default states
+      if (hasAudioDevice) {
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          audioTrack.enabled = !isMuted;
+          console.log('Audio track initialized:', {
+            enabled: audioTrack.enabled,
+            label: audioTrack.label
+          });
+        }
       }
-      if (hasVideo) {
-        stream.getVideoTracks().forEach(track => {
-          track.enabled = hasVideo;
-        });
+
+      if (hasVideoDevice) {
+        const videoTrack = stream.getVideoTracks()[0];
+        if (videoTrack) {
+          videoTrack.enabled = false; // Always start with video off
+          setHasVideo(false);
+          console.log('Video track initialized:', {
+            enabled: videoTrack.enabled,
+            label: videoTrack.label
+          });
+        }
       }
+
+      setIsConnected(true);
+      console.log('Media devices setup completed successfully');
+
     } catch (error) {
       const mediaError = error as MediaDeviceError;
-      console.error('Error accessing media devices:', mediaError);
+      console.error('Media device setup error:', {
+        name: mediaError.name,
+        message: mediaError.message
+      });
       
-      let errorMessage = "No media devices available";
-      if (mediaError.name === "NotFoundError") {
-        errorMessage = "No camera or microphone found. You can still join without devices.";
-      } else if (mediaError.name === "NotAllowedError") {
-        errorMessage = "Media access denied. You can still join without audio/video.";
+      let errorMessage = "Unable to access media devices";
+      let actionNeeded = "";
+
+      switch (mediaError.name) {
+        case "NotFoundError":
+          errorMessage = "No camera or microphone found";
+          actionNeeded = "You can still join without devices";
+          break;
+        case "NotAllowedError":
+          errorMessage = "Media access denied";
+          actionNeeded = "Please grant permission to use your camera/microphone";
+          break;
+        case "NotReadableError":
+          errorMessage = "Media device is in use by another application";
+          actionNeeded = "Please close other apps using your camera/microphone";
+          break;
+        case "OverconstrainedError":
+          errorMessage = "Media device constraints not satisfied";
+          actionNeeded = "Trying with different device settings";
+          break;
       }
       
       toast({
         title: "Media Device Notice",
-        description: errorMessage,
+        description: `${errorMessage}. ${actionNeeded}`,
         variant: "default"
       });
       
-      // Allow joining without devices
+      // Allow joining with fallback options
       setIsConnected(true);
       setIsMuted(true);
       setHasVideo(false);
@@ -205,56 +332,183 @@ const Room = () => {
 
   // Main effect for room initialization
   useEffect(() => {
-    if (!roomId) return; // Don't initialize if no roomId
+    if (!roomId || !username) {
+      console.error('Missing required room parameters');
+      navigate('/');
+      return;
+    }
 
-    console.log('Current Room ID:', roomId);  // Added logging
-
+    console.log('Initializing room:', { roomId, username });
+    
     const socket = socketService.getSocket();
     setSocket(socket);
 
-    // Add the current user to participants first
-    setParticipants([{
+    // Add current user to participants
+    const currentUser = {
       id: userId,
-      name: userName,
+      username: username,
       avatar: '👤',
       isHost: false,
       isModerator: false,
       isMuted: true,
       hasVideo: false,
       volume: 100
-    }]);
+    };
 
+    // Join room and request existing participants
     socket.emit('joinRoom', {
       roomId,
-      username: userName,  // Using userName but keeping username in the interface
+      username,
       userId
+    }, (response: JoinRoomResponse) => {
+      console.log('Raw join room response:', JSON.stringify(response, null, 2));
+
+      let existingParticipants: Participant[] = [];
+
+      // Handle response which might contain nested participant data
+      if (response?.participants) {
+        existingParticipants = response.participants.map((p: ServerParticipant) => ({
+          id: p.id,
+          username: p.username,
+          isHost: p.isHost,
+          avatar: p.avatar || '👤',
+          isModerator: p.isModerator || false,
+          isMuted: p.isMuted || true,
+          hasVideo: p.hasVideo || false,
+          volume: p.volume || 100
+        }));
+      }
+
+      // Also check for participant field in response
+      if (response?.participant) {
+        const p = response.participant;
+        if (!existingParticipants.some(ep => ep.id === p.id)) {
+          existingParticipants.push({
+            id: p.id,
+            username: p.username,
+            isHost: p.isHost,
+            avatar: p.avatar || '👤',
+            isModerator: p.isModerator || false,
+            isMuted: p.isMuted || true,
+            hasVideo: p.hasVideo || false,
+            volume: p.volume || 100
+          });
+        }
+      }
+
+      console.log('Processed participants:', existingParticipants);
+      
+      setParticipants([
+        currentUser,
+        ...existingParticipants.filter(p => p.id !== userId)
+      ]);
     });
 
-    socket.on('participantJoined', (participant: Participant) => {
-      if (!participant.name) return; // Skip if no name is provided
+    // Handle new participant joining
+    socket.on('participantJoined', (data: { participant: ServerParticipant, participants: ServerParticipant[] }) => {
+      console.log('New participant joined - Raw data:', data);
+      
+      if (!data.participant?.id || !data.participant?.username) {
+        console.error('Invalid participant data received:', data);
+        return;
+      }
+
+      // Process the new participant
+      const processedParticipant: Participant = {
+        id: data.participant.id,
+        username: data.participant.username,
+        isHost: data.participant.isHost,
+        avatar: data.participant.avatar || '👤',
+        isModerator: data.participant.isModerator || false,
+        isMuted: data.participant.isMuted || true,
+        hasVideo: data.participant.hasVideo || false,
+        volume: data.participant.volume || 100
+      };
+      
       setParticipants(prev => {
-        const newParticipants = [...prev, participant];
-        // Log other participants (excluding self)
-        console.log('Other participants in room:', 
-          newParticipants.filter(p => p.id !== userId)
-            .map(p => ({ id: p.id, name: p.name }))
-        );
+        // Check if participant already exists
+        if (prev.some(p => p.id === processedParticipant.id)) {
+          console.log('Participant already exists, skipping:', processedParticipant.id);
+          return prev;
+        }
+
+        // Add new participant
+        const newParticipants = [...prev, processedParticipant];
+        console.log('Updated participants list:', newParticipants);
         return newParticipants;
       });
+
+      // Show toast with username
       toast({
-        title: "New participant joined",
-        description: `${participant.name} has joined the room`,
+        title: "New Participant",
+        description: `${processedParticipant.username} joined the room`,
       });
+
+      // Also update participant list if received
+      if (data.participants?.length > 0) {
+        setParticipants(prev => {
+          const currentIds = new Set(prev.map(p => p.id));
+          const newParticipants = data.participants
+            .filter(p => p.id && !currentIds.has(p.id))
+            .map(p => ({
+              id: p.id,
+              username: p.username,
+              isHost: p.isHost,
+              avatar: p.avatar || '👤',
+              isModerator: p.isModerator || false,
+              isMuted: p.isMuted || true,
+              hasVideo: p.hasVideo || false,
+              volume: p.volume || 100
+            }));
+          
+          if (newParticipants.length > 0) {
+            console.log('Adding additional participants:', newParticipants);
+            return [...prev, ...newParticipants];
+          }
+          return prev;
+        });
+      }
     });
 
+    // Handle participant leaving
     socket.on('participantLeft', (participantId: string) => {
+      console.log('Participant leaving:', participantId);
+      
+      // Remove from participants list
       setParticipants(prev => prev.filter(p => p.id !== participantId));
-      if (peerConnectionsRef.current[participantId]) {
-        peerConnectionsRef.current[participantId].close();
+      
+      // Cleanup peer connection
+      const peerConnection = peerConnectionsRef.current[participantId];
+      if (peerConnection) {
+        console.log('Cleaning up peer connection for:', participantId);
+        peerConnection.close();
         delete peerConnectionsRef.current[participantId];
       }
     });
 
+    // Handle participant updates
+    socket.on('participantUpdate', (update: ParticipantUpdatePayload) => {
+      console.log('Received participant update - Raw data:', JSON.stringify(update, null, 2));
+      setParticipants(prev => {
+        console.log('Current participants before update:', JSON.stringify(prev, null, 2));
+        const updated = prev.map(p => {
+          if (p.id === update.userId) {
+            const updatedParticipant = {
+              ...p,
+              ...update.updates,
+              name: update.username
+            };
+            console.log('Updated participant:', JSON.stringify(updatedParticipant, null, 2));
+            return updatedParticipant;
+          }
+          return p;
+        });
+        console.log('Updated participants list:', JSON.stringify(updated, null, 2));
+        return updated;
+      });
+    });
+
+    // Handle messages
     socket.on('message', (message: MessagePayload) => {
       setMessages(prev => [...prev, {
         id: message.id,
@@ -265,81 +519,194 @@ const Room = () => {
       }]);
     });
 
-    socket.on('participantUpdate', (update: ParticipantUpdatePayload) => {
-      setParticipants(prev => prev.map(p => 
-        p.id === update.userId
-          ? { ...p, ...update.updates, name: update.username }  // Added name update
-          : p
-      ));
+    // Handle connection errors
+    socket.on('connect_error', (error: Error) => {
+      console.error('Socket connection error:', error);
+      toast({
+        title: "Connection Error",
+        description: "Lost connection to the room. Attempting to reconnect...",
+        variant: "destructive"
+      });
     });
 
     // Initialize WebRTC
-    setupMediaDevices();
+    setupMediaDevices().catch(error => {
+      console.error('Failed to setup media devices:', error);
+    });
 
+    // Cleanup function
     return () => {
+      console.log('Cleaning up room connection');
       socket.emit('leaveRoom', { roomId });
       cleanupMediaDevices();
-      mediaSetupAttempted.current = false; // Reset the flag on cleanup
+      mediaSetupAttempted.current = false;
+      
+      // Cleanup socket listeners
       socket.off('participantJoined');
       socket.off('participantLeft');
-      socket.off('message');
       socket.off('participantUpdate');
+      socket.off('message');
+      socket.off('connect_error');
     };
-  }, [roomId, userId, cleanupMediaDevices, setupMediaDevices, toast]);
+  }, [roomId, userId, username, navigate, cleanupMediaDevices, setupMediaDevices, toast]);
 
   const sendMessage = () => {
-    if (newMessage.trim() && socket) {
+    if (!socket || !roomId) {
+      toast({
+        title: "Connection Error",
+        description: "Not connected to room. Please try reconnecting.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    const trimmedMessage = newMessage.trim();
+    if (!trimmedMessage) {
+      return;
+    }
+
+    try {
       const messagePayload: MessagePayload = {
         id: crypto.randomUUID(),
-        roomId: roomId!,
-        userId,  // Changed from username to userId
-        username,  // This is correct as username
-        content: newMessage.trim(),
+        roomId,
+        userId,
+        username,
+        content: trimmedMessage,
         timestamp: new Date()
       };
-      socket.emit('message', messagePayload);
-      setNewMessage("");
+
+      socket.emit('message', messagePayload, (error: Error | null) => {
+        if (error) {
+          console.error('Failed to send message:', error);
+          toast({
+            title: "Message Error",
+            description: "Failed to send message. Please try again.",
+            variant: "destructive"
+          });
+          return;
+        }
+        setNewMessage("");
+      });
+    } catch (error) {
+      console.error('Error sending message:', error);
+      toast({
+        title: "Message Error",
+        description: "An error occurred while sending your message.",
+        variant: "destructive"
+      });
     }
   };
 
-  const toggleMute = () => {
-    if (localStreamRef.current) {
+  const toggleMute = useCallback(() => {
+    if (!localStreamRef.current) {
+      console.warn('No local stream available');
+      return;
+    }
+
+    try {
       const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsMuted(!audioTrack.enabled);
-        socket?.emit('participantUpdate', {
-          roomId,
-          username: userName,
-          updates: { isMuted: !audioTrack.enabled }
-        });
+      if (!audioTrack) {
+        console.warn('No audio track available');
+        return;
       }
-    }
-  };
 
-  const toggleVideo = () => {
-    if (localStreamRef.current) {
+      const newMutedState = !audioTrack.enabled;
+      audioTrack.enabled = !newMutedState;
+      setIsMuted(newMutedState);
+      
+      // Update our local participant state first
+      setParticipants(prev => prev.map(p => 
+        p.id === userId
+          ? { ...p, isMuted: newMutedState }
+          : p
+      ));
+      
+      // Then emit the update to others
+      socket?.emit('participantUpdate', {
+        roomId,
+        userId,
+        username,
+        updates: { isMuted: newMutedState }
+      });
+
+      console.log('Audio track state updated:', {
+        enabled: audioTrack.enabled,
+        label: audioTrack.label
+      });
+    } catch (error) {
+      console.error('Error toggling mute:', error);
+      toast({
+        title: "Audio Error",
+        description: "Failed to update audio state. Please try again.",
+        variant: "destructive"
+      });
+    }
+  }, [roomId, socket, toast, userId, username]);
+
+  const toggleVideo = useCallback(() => {
+    if (!localStreamRef.current) {
+      console.warn('No local stream available');
+      return;
+    }
+
+    try {
       const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setHasVideo(videoTrack.enabled);
-        socket?.emit('participantUpdate', {
-          roomId,
-          username: userName,
-          updates: { hasVideo: videoTrack.enabled }
-        });
+      if (!videoTrack) {
+        console.warn('No video track available');
+        return;
       }
-    }
-  };
 
-  const toggleConnection = () => {
+      videoTrack.enabled = !videoTrack.enabled;
+      setHasVideo(videoTrack.enabled);
+      
+      socket?.emit('participantUpdate', {
+        roomId,
+        userId,
+        username,
+        updates: { hasVideo: videoTrack.enabled }
+      });
+
+      console.log('Video track state updated:', {
+        enabled: videoTrack.enabled,
+        label: videoTrack.label
+      });
+    } catch (error) {
+      console.error('Error toggling video:', error);
+      toast({
+        title: "Video Error",
+        description: "Failed to update video state. Please try again.",
+        variant: "destructive"
+      });
+    }
+  }, [roomId, socket, toast, userId, username]);
+
+  const toggleConnection = useCallback(() => {
     if (isConnected) {
       cleanupMediaDevices();
+      setIsConnected(false);
+      toast({
+        title: "Disconnected",
+        description: "Media devices have been turned off",
+      });
     } else {
-      setupMediaDevices();
+      setupMediaDevices()
+        .then(() => {
+          setIsConnected(true);
+          toast({
+            title: "Connected",
+            description: "Media devices are now active",
+          });
+        })
+        .catch(error => {
+          console.error('Failed to setup media devices:', error);
+          toast({
+            title: "Connection Error",
+            description: "Failed to initialize media devices. Please check your settings.",
+            variant: "destructive"
+          });
+        });
     }
-    setIsConnected(!isConnected);
-  };
+  }, [isConnected, cleanupMediaDevices, setupMediaDevices, toast]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
@@ -395,7 +762,7 @@ const Room = () => {
                     <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-4">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <span className="text-white font-medium">{participant.name}</span>
+                          <span className="text-white font-medium">{participant.username}</span>
                           {participant.isHost && <Crown className="w-4 h-4 text-yellow-400" />}
                           {participant.isModerator && <Shield className="w-4 h-4 text-blue-400" />}
                           {participant.isOnStage && (

@@ -13,7 +13,7 @@ export interface Room {
 
 export interface Participant {
   id: string;
-  name: string; // Made required by removing ?
+  username: string; // Made required by removing ?
   avatar?: string;
   isHost?: boolean;
   isModerator?: boolean;
